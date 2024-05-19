@@ -1,32 +1,19 @@
 """
-This script is a Selenium bot that redeems a gift code
-for the mobile game Whiteout Survival by using their website
+This script redeems a gift code for players of the mobile game 
+Whiteout Survival by using their API
 
 It requires an input file that contains all player IDs and 
 tracks its progress in an output file to be able to continue
 in case it runs into errors without retrying to redeem a code
 for everyone
-
-This script currently only supports Mac OS because it is based
-on the Safari browser
 """
 import argparse
+import hashlib
 import json
 import sys
+import time
 
-from selenium.webdriver.support import ui
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.common.by import By
-
-
-def save_results(filename, results_to_save):
-    """
-    This function was needed to make sure we can save progress on TimeoutExceptions
-    """
-    with open(filename, 'w', encoding="utf-8") as fp:
-        json.dump(results_to_save, fp)
-
+import requests
 
 # Handle arguments the script is called with
 parser = argparse.ArgumentParser()
@@ -35,7 +22,7 @@ parser.add_argument('-f', '--player-file',
                     dest='player_file', default='player.json')
 parser.add_argument('-r', '--results-file',
                     dest='results_file', default='results.json')
-parser.add_argument('--restart', type=bool, dest='restart', default=False)
+parser.add_argument('--restart', dest='restart', action="store_true")
 args = parser.parse_args()
 
 # Open and read the user files
@@ -58,101 +45,89 @@ if found_item is None:
 else:
     result = found_item
 
-# Setup Selenium
-URL = "https://wos-giftcode.centurygame.com"
-driver = webdriver.Safari()
-driver.get(URL)
-wait = ui.WebDriverWait(driver, 30)
-
 # Some variables that are used to tracking progress
 session_counter = 1
 counter_successfully_claimed = 0
 counter_already_claimed = 0
 counter_error = 0
 
+URL = "https://wos-giftcode-api.centurygame.com/api"
+# The salt is appended to the string that is then signed using md5 and sent as part of the request
+SALT = "tB87#kPtkxqOS2"
+HTTP_HEADER = {"Content-Type": "application/x-www-form-urlencoded",
+               "Accept": "application/json"}
+
+i = 0
 for player in players:
+
+    # Print progress bar
+    i += 1
+
+    print("\x1b[K" + str(i) + "/" + str(len(players)) +
+          " complete. Redeeming for " + player["original_name"], end="\r", flush=True)
 
     # Check if the code has been redeemed for this player already
     # Continue to the next iteration if it has been
-    if result["status"].get(player["id"]) == "Successful":
+    if result["status"].get(player["id"]) == "Successful" and not args.restart:
+        counter_already_claimed += 1
         continue
 
     # This is necessary because we reload the page every 5 players
     # and the website isn't sometimes ready before we continue
-    try:
-        wait.until(lambda driver: driver.find_element(
-            By.XPATH, "//input[contains(@placeholder,'Player ID')]"))
-    except TimeoutException as e:
-        print("Timeout Exception")
-        save_results(args.results_file, results)
+    request_data = {"fid": player["id"], "time": time.time_ns()}
+    request_data["sign"] = hashlib.md5(("fid=" + request_data["fid"] + "&time=" + str(
+        request_data["time"]) + SALT).encode("utf-8")).hexdigest()
+
+    # Login the player
+    # It is enough to send the POST request, we don't need to store any cookies/session tokens
+    # to authenticate during the next request
+    login_request = requests.post(
+        URL + '/player', data=request_data, headers=HTTP_HEADER, timeout=30)
+    login_response = login_request.json()
+    if login_response["msg"] != "success":
+        print("Login not possible")
         sys.exit(1)
 
-    # Enter the player ID
-    player_id_input = driver.find_element(
-        By.XPATH, "//input[contains(@placeholder,'Player ID')]")
-    player_id_input.clear()
-    player_id_input.send_keys(player["id"])
+    # Create the request data that contains the signature and the code
+    request_data["cdk"] = args.code
+    request_data["sign"] = hashlib.md5(("cdk=" + request_data["cdk"] + \
+                                        "&fid=" + request_data["fid"] + \
+                                        "&time=" + str(request_data["time"]) + \
+                                        SALT).encode("utf-8")).hexdigest()
 
-    # Login the player by using the login button
-    # We are using the Selenium wait feature to make sure the player is logged in before we continue
-    # We know the player is logged in, once the exit icon appears
-    login_button = driver.find_element(By.CLASS_NAME, "login_btn").click()
-    try:
-        wait.until(lambda driver: driver.find_element(
-            By.CLASS_NAME, "exit_icon"))
-    except TimeoutException as e:
-        print("Timeout Exception")
-        save_results(args.results_file, results)
-        sys.exit(1)
-
-    # Now we record the login name for later
-    player["name"] = driver.find_element(By.CLASS_NAME, "name").text
-
-    # Enter the gift code and hit confirm
-    # We again wait until the request is sent before we continue
-    gift_code_input = driver.find_element(
-        By.XPATH, "//input[contains(@placeholder,'Enter Gift Code')]")
-    gift_code_input.clear()
-    gift_code_input.send_keys(args.code)
-    redeem_button = driver.find_element(By.CLASS_NAME, "exchange_btn").click()
-    try:
-        wait.until(lambda driver: driver.find_element(
-            By.CLASS_NAME, "confirm_btn"))
-    except TimeoutException as e:
-        print("Timeout Exception")
-        save_results(args.results_file, results)
-        sys.exit(1)
-    player["status"] = driver.find_element(By.CLASS_NAME, "msg").text
+    # Send the gif code redemption request
+    redeem_request = requests.post(
+        URL + '/gift_code', data=request_data, headers=HTTP_HEADER, timeout=30)
+    redeem_response = redeem_request.json()
 
     # In case the gift code is broken, exit straight away
-    if player["status"] == "Gift Code not found!":
-        print("The gift code doesn't exist!")
+    if redeem_response["err_code"] == 40014:
+        print("\nThe gift code doesn't exist!")
         sys.exit(1)
-    elif player["status"] == "Expired, unable to claim.":
-        print("The gift code is expired!")
+    elif redeem_response["err_code"] == 40007:
+        print("\nThe gift code is expired!")
         sys.exit(1)
-    elif player["status"] == "Already claimed, unable to claim again.":
+    elif redeem_response["err_code"] == 40008:  # ALREADY CLAIMED
         counter_already_claimed += 1
         result["status"][player["id"]] = "Successful"
-    elif player["status"] == "Redeemed, please claim the rewards in your mail!":
+    elif redeem_response["err_code"] == 20000:  # SUCCESSFULLY CLAIMED
         counter_successfully_claimed += 1
         result["status"][player["id"]] = "Successful"
+    elif redeem_response["err_code"] == 40004:  # TIMEOUT RETRY
+        result["status"][player["id"]] = "Unsuccessful"
     else:
         result["status"][player["id"]] = "Unsuccessful"
+        print("\nError occurred: " + str(redeem_response))
         counter_error += 1
-
-    driver.find_element(By.CLASS_NAME, "confirm_btn").click()
-
-    # Now we log the user out again before we continue with the next one
-    driver.find_element(By.CLASS_NAME, "exit_icon").click()
 
     # Refresh the webpage every 5 players to avoid getting soft-banned at some point
     if session_counter % 5 == 0:
-        driver.refresh()
+        time.sleep(5)
 
     session_counter += 1
 
-save_results(args.results_file, results)
+with open(args.results_file, 'w', encoding="utf-8") as fp:
+    json.dump(results, fp)
 
 # Print general stats
 print("\nSuccessfully claimed gift code for " + str(counter_successfully_claimed) + " players.\n" +
