@@ -12,6 +12,7 @@ import hashlib
 import json
 import sys
 import time
+from os.path import exists
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
@@ -30,8 +31,13 @@ args = parser.parse_args()
 with open(args.player_file, encoding="utf-8") as player_file:
     players = json.loads(player_file.read())
 
-with open(args.results_file, encoding="utf-8") as results_file:
-    results = json.loads(results_file.read())
+# Initalize results to not error if no results file exists yet
+results = []
+
+# If a results file exists, load it
+if exists(args.results_file):
+    with open(args.results_file, encoding="utf-8") as results_file:
+        results = json.loads(results_file.read())
 
 # Retrieve the result set if it exists or create an empty one
 # We make sure that we get a view of the dictionary so we can modify
@@ -40,6 +46,7 @@ found_item = next(
     (result for result in results if result["code"] == args.code), None)
 
 if found_item is None:
+    print("New code:" + args.code + " adding to results file and processing.")
     new_item = {"code": args.code, "status": {}}
     results.append(new_item)
     result = new_item
