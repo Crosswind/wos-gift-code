@@ -14,6 +14,7 @@ import sys
 import time
 
 import requests
+from requests.adapters import HTTPAdapter, Retry
 
 # Handle arguments the script is called with
 parser = argparse.ArgumentParser()
@@ -58,6 +59,13 @@ HTTP_HEADER = {"Content-Type": "application/x-www-form-urlencoded",
                "Accept": "application/json"}
 
 i = 0
+
+# Enable retry login and backoff behavior so if you have a large number of players (> 30) it'll not fail
+# Default rate limits of WOS API is 30 in 1 min.
+r = requests.Session()
+retry_config = Retry(total=5, backoff_factor=1, status_forcelist=[ 429 ], allowed_methods=False)
+r.mount("https://", HTTPAdapter(max_retries=retry_config))
+
 for player in players:
 
     # Print progress bar
@@ -81,12 +89,15 @@ for player in players:
     # Login the player
     # It is enough to send the POST request, we don't need to store any cookies/session tokens
     # to authenticate during the next request
-    login_request = requests.post(
+    login_request = r.post(
         URL + '/player', data=request_data, headers=HTTP_HEADER, timeout=30)
     login_response = login_request.json()
+
+    # Login failed for user, report, count error and continue gracefully to complete all other players
     if login_response["msg"] != "success":
-        print("Login not possible")
-        sys.exit(1)
+        print("Login not possible for player: " + player["original_name"] + " / " + player["id"] + " - validate their player ID. Skipping.")
+        counter_error += 1
+        continue
 
     # Create the request data that contains the signature and the code
     request_data["cdk"] = args.code
@@ -96,7 +107,7 @@ for player in players:
                                         SALT).encode("utf-8")).hexdigest()
 
     # Send the gif code redemption request
-    redeem_request = requests.post(
+    redeem_request = r.post(
         URL + '/gift_code', data=request_data, headers=HTTP_HEADER, timeout=30)
     redeem_response = redeem_request.json()
 
