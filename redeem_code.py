@@ -46,7 +46,7 @@ found_item = next(
     (result for result in results if result["code"] == args.code), None)
 
 if found_item is None:
-    print("New code:" + args.code + " adding to results file and processing.")
+    print("New code: " + args.code + " adding to results file and processing.")
     new_item = {"code": args.code, "status": {}}
     results.append(new_item)
     result = new_item
@@ -54,7 +54,6 @@ else:
     result = found_item
 
 # Some variables that are used to tracking progress
-session_counter = 1
 counter_successfully_claimed = 0
 counter_already_claimed = 0
 counter_error = 0
@@ -137,12 +136,6 @@ for player in players:
         result["status"][player["id"]] = "Unsuccessful"
         print("\nError occurred: " + str(redeem_response))
         counter_error += 1
-
-    # Refresh the webpage every 5 players to avoid getting soft-banned at some point
-    if session_counter % 5 == 0:
-        time.sleep(5)
-
-    session_counter += 1
 
 with open(args.results_file, 'w', encoding="utf-8") as fp:
     json.dump(results, fp)
