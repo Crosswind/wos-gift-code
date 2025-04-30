@@ -1,8 +1,8 @@
 """
-This script redeems a gift code for players of the mobile game 
+This script redeems a gift code for players of the mobile game
 Whiteout Survival by using their API
 
-It requires an input file that contains all player IDs and 
+It requires an input file that contains all player IDs and
 tracks its progress in an output file to be able to continue
 in case it runs into errors without retrying to redeem a code
 for everyone
@@ -13,6 +13,8 @@ import hashlib
 import json
 import sys
 import time
+import base64
+import ddddocr
 from os.path import exists
 
 import requests
@@ -74,6 +76,27 @@ retry_config = Retry(
 )
 r.mount("https://", HTTPAdapter(max_retries=retry_config))
 
+
+def analyze_captcha_image_and_change_2_text(base64_string):
+    # Remove base64 string header
+    if "," in base64_string:
+        base64_string = base64_string.split(",")[1]
+
+    # Convert base64 to image data
+    img_data = base64.b64decode(base64_string)
+
+    # Initialize ddddocr
+    ocr = ddddocr.DdddOcr(show_ad=False)
+
+    # Recognize captcha
+    result = ocr.classification(img_data)
+
+    # Convert to uppercase
+    text = result.upper()
+
+    return text
+
+
 for player in players:
 
     # Print progress bar
@@ -98,7 +121,8 @@ for player in players:
 
     # This is necessary because we reload the page every 5 players
     # and the website isn't sometimes ready before we continue
-    request_data = {"fid": player["id"], "time": time.time_ns()}
+    timestamp = time.time_ns()
+    request_data = {"fid": player["id"], "time": timestamp}
     request_data["sign"] = hashlib.md5(
         (
             "fid=" + request_data["fid"] + "&time=" + str(request_data["time"]) + SALT
@@ -125,11 +149,48 @@ for player in players:
         counter_error += 1
         continue
 
+    captcha_data = {"fid": player["id"], "time": timestamp, "init": "0"}
+    captcha_data["sign"] = hashlib.md5(
+        (
+            "fid="
+            + captcha_data["fid"]
+            + "&init="
+            + captcha_data["init"]
+            + "&time="
+            + str(captcha_data["time"])
+            + SALT
+        ).encode("utf-8")
+    ).hexdigest()
+
+    # Login the player - get captcha
+    captcha_request = r.post(
+        URL + "/captcha", data=captcha_data, headers=HTTP_HEADER, timeout=30
+    )
+    captcha_response = captcha_request.json()
+
+    # Login failed for user, report, count error and continue gracefully to complete all other players
+    if captcha_response["msg"] != "SUCCESS":
+        print(
+            "Login not possible for player: "
+            + player["original_name"]
+            + " / "
+            + player["id"]
+            + " - Captcha failed. Skipping."
+        )
+        counter_error += 1
+        continue
+
+    captcha_img = captcha_response["data"]["img"]
+
     # Create the request data that contains the signature and the code
+    request_data["captcha_code"] = analyze_captcha_image_and_change_2_text(captcha_img)
     request_data["cdk"] = args.code
+    request_data["time"] = str(time.time_ns())
     request_data["sign"] = hashlib.md5(
         (
-            "cdk="
+            "captcha_code="
+            + request_data["captcha_code"]
+            + "&cdk="
             + request_data["cdk"]
             + "&fid="
             + request_data["fid"]
@@ -159,6 +220,10 @@ for player in players:
         counter_successfully_claimed += 1
         result["status"][player["id"]] = "Successful"
     elif redeem_response["err_code"] == 40004:  # TIMEOUT RETRY
+        result["status"][player["id"]] = "Unsuccessful"
+    elif redeem_response["err_code"] == 40101:  # CAPTCHA CHECK TOO FREQUENT.
+        result["status"][player["id"]] = "Unsuccessful"
+    elif redeem_response["err_code"] == 40103:  # CAPTCHA CHECK ERROR.
         result["status"][player["id"]] = "Unsuccessful"
     else:
         result["status"][player["id"]] = "Unsuccessful"
